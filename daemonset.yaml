@@ -45,7 +45,7 @@ spec:
               topologyKey: kubernetes.io/hostname
       initContainers:
         - name: mount-bpf-fs
-          image: alexdecb/eebpf:1
+          image: xiangyug/eebpf:1
           imagePullPolicy: IfNotPresent
           command: ["/bin/bash", "-c", "--"]
           args:
@@ -60,7 +60,7 @@ spec:
               mountPropagation: Bidirectional
       containers:
         - name: eebpf
-          image: alexdecb/eebpf:1
+          image: xiangyug/eebpf:1
           imagePullPolicy: IfNotPresent
           command: ["/bin/bash", "-lc"]
           args:
