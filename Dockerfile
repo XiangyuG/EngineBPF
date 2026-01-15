@@ -19,6 +19,6 @@ RUN curl -fsSL \
  && chmod +x /usr/bin/bpftool || true
 
 WORKDIR /eebpf
-COPY . /eebpf
+COPY ./src /eebpf
 
 CMD ["sleep", "infinity"]
