@@ -1,0 +1,151 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: eebpf
+  labels:
+    k8s-app: eebpf
+spec:
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      k8s-app: eebpf
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        k8s-app: eebpf
+      annotations:
+        kubectl.kubernetes.io/default-container: eebpf
+    spec:
+      automountServiceAccountToken: true
+      nodeSelector:
+        kubernetes.io/os: linux
+      priorityClassName: system-node-critical
+      tolerations:
+        - operator: Exists
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      terminationGracePeriodSeconds: 5
+      securityContext:
+        seccompProfile:
+          type: Unconfined
+        appArmorProfile:
+          type: Unconfined
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  k8s-app: eebpf
+              topologyKey: kubernetes.io/hostname
+      initContainers:
+        - name: mount-bpf-fs
+          image: alexdecb/eebpf:1
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c", "--"]
+          args:
+            - |
+              set -euo pipefail
+              mount | grep -q "on /sys/fs/bpf type bpf" || mount -t bpf bpf /sys/fs/bpf
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: bpf-maps
+              mountPath: /sys/fs/bpf
+              mountPropagation: Bidirectional
+      containers:
+        - name: eebpf
+          image: alexdecb/eebpf:1
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              echo "eebpf ready on node: ${K8S_NODE_NAME}"
+              sleep infinity
+          env:
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.name
+          securityContext:
+            privileged: true
+            allowPrivilegeEscalation: true
+            readOnlyRootFilesystem: false
+            capabilities:
+              add:
+                - SYS_ADMIN
+                - SYS_RESOURCE
+                - SYS_PTRACE
+                - SYS_MODULE
+                - NET_ADMIN
+                - NET_RAW
+                - IPC_LOCK
+                - DAC_OVERRIDE
+                - FOWNER
+                - SETUID
+                - SETGID
+                - CHOWN
+                - KILL
+              drop: ["ALL"]
+          volumeMounts:
+            - name: bpf-maps
+              mountPath: /sys/fs/bpf
+              mountPropagation: Bidirectional
+            - name: debugfs
+              mountPath: /sys/kernel/debug
+              mountPropagation: HostToContainer
+            - name: lib-modules
+              mountPath: /lib/modules
+              readOnly: true
+            - name: hostproc
+              mountPath: /host/proc
+              readOnly: true
+            - name: host-run
+              mountPath: /host/run
+            - name: host-var-run
+              mountPath: /host/var/run
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: bpf-maps
+          hostPath:
+            path: /sys/fs/bpf
+            type: DirectoryOrCreate
+        - name: debugfs
+          hostPath:
+            path: /sys/kernel/debug
+            type: DirectoryOrCreate
+        - name: lib-modules
+          hostPath:
+            path: /lib/modules
+            type: Directory
+        - name: hostproc
+          hostPath:
+            path: /proc
+            type: Directory
+        - name: host-run
+          hostPath:
+            path: /run
+            type: Directory
+        - name: host-var-run
+          hostPath:
+            path: /var/run
+            type: DirectoryOrCreate
