@@ -148,6 +148,13 @@ int redirect_service(struct __sk_buff *skb) {
             bpf_trace_printk("l4 csum replace ret=%d\\n", ret);
             return TC_ACT_SHOT;
         }        
+	/*
+	if (new_dst_ip == server pod1 IP) {
+	    // return bpf_redirect(server pod1 ifindex, 0);
+	} else {
+	    // return bpf_redirect(server pod ifindex, 0);
+	}
+	*/
         return TC_ACT_OK;
     }   
 
@@ -170,6 +177,7 @@ int redirect_service(struct __sk_buff *skb) {
             bpf_trace_printk("l4 csum replace ret=%d\\n", ret);
             return TC_ACT_SHOT;
         }
+	// return bpf_redirect(src pod ifindex, 0);
         return TC_ACT_OK;
    }
     
