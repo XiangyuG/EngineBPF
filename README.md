@@ -18,6 +18,11 @@ docker build -t xiangyug/eebpf:1 .
 docker push <namespace>/eebpf:<tag>
 ```
 
+Example:
+```bash
+docker push xiangyug/eebpf:1 
+```
+
 3. Update the image reference in the DaemonSet:
 ```bash
 sed 's|xiangyug/eebpf:1|<namespace>/eebpf:<tag>|g' daemonset.yaml
