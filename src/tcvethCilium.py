@@ -130,7 +130,7 @@ try:
 
     for idx in indexes:
         fn = b.load_func("redirect_service", BPF.SCHED_CLS)
-        ipr.tc("add-filter", "bpf", idx, ":1", fd=fn.fd, name=fn.name, parent="ffff:fff2", classid=1)
+        ipr.tc("add-filter", "bpf", idx, ":1", fd=fn.fd, name=fn.name, parent="ffff:fff2", classid=1, direct_action=True)
 
 
     print(f"BPF attached to {interfaces} - SCHED_CLS: OK")
