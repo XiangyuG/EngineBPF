@@ -47,7 +47,7 @@ cd src && vim conf.json
 
 5. Run the tool:
 ```bash
-python3 tcvethCilium.py --config conf.json
+python3 tcvethCilium.py --config conf.json &
 ```
 
 The image also includes the `bpftool` binary, which can be used directly inside the container.
