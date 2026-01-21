@@ -160,6 +160,7 @@ int redirect_service(struct __sk_buff *skb) {
             return TC_ACT_SHOT;
         }        
 	
+    bpf_skb_change_type(skb,PACKET_HOST);
 	if (new_dst_ip == bpf_htonl(NEW_DST_IP)) {
 	    return bpf_redirect_peer(DSTIFINDEX, 0);
 	} else {
