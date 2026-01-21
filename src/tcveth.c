@@ -7,21 +7,32 @@
 #include <linux/udp.h>
 #include <linux/tcp.h> // --> struct tcphdr tcp;
 
-
 #ifndef SRC_IP
 #define SRC_IP 0x0A0001D2  // 10.0.1.210 (hex representation)
 #endif
 
+#ifndef SRCIF
+#define SRCIF 13          // source interface ifindex
+#endif
+
 #ifndef SVCIP
-#define SVCIP 0x0A686FCF // 10.104.111.207 (hex representation)
+#define SVCIP 0x0A686FCF  // 10.104.111.207 (hex representation)
 #endif
 
 #ifndef NEW_DST_IP
 #define NEW_DST_IP 0x0A00017A  // 10.0.1.122 (hex representation)
 #endif
 
+#ifndef DSTIFINDEX
+#define DSTIFINDEX 12          // destination #1 interface ifindex
+#endif
+
 #ifndef NEW_DST_IP2
-#define NEW_DST_IP2 0x0A000154  // 10.0.1.84
+#define NEW_DST_IP2 0x0A000154  // 10.0.1.84 (hex representation)
+#endif
+
+#ifndef DSTIFINDEX2
+#define DSTIFINDEX2 15          // destination #2 interface ifindex
 #endif
 
 
@@ -148,14 +159,13 @@ int redirect_service(struct __sk_buff *skb) {
             bpf_trace_printk("l4 csum replace ret=%d\\n", ret);
             return TC_ACT_SHOT;
         }        
-	/*
+	
 	if (new_dst_ip == bpf_htonl(NEW_DST_IP)) {
-	    // return bpf_redirect_peer(ifindex, 0);
+	    return bpf_redirect_peer(DSTIFINDEX, 0);
 	} else {
-	    // return bpf_redirect_peer(ifindex, 0);
+	    return bpf_redirect_peer(DSTIFINDEX2, 0);
 	}
-	*/
-        return TC_ACT_OK;
+	
     }   
 
     key.src_ip = dst_ip;
@@ -177,8 +187,7 @@ int redirect_service(struct __sk_buff *skb) {
             bpf_trace_printk("l4 csum replace ret=%d\\n", ret);
             return TC_ACT_SHOT;
         }
-	// return bpf_redirect(ifindex, 0);
-        return TC_ACT_OK;
+	return bpf_redirect(SRCIF, 0);
    }
     
    return TC_ACT_OK;
