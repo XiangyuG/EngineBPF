@@ -107,6 +107,9 @@ int redirect_service(struct __sk_buff *skb) {
    if (ip->protocol == IPPROTO_TCP) {
     struct tcphdr *tcp = l4; 
     key.src_port = tcp->dest;
+   } else if (ip->protocol == IPPROTO_UDP) {
+    struct udphdr *udp = l4;
+    key.src_port = udp->dest;
    }
 
    //u8 *is_backend = backend_set.lookup(&src_ip);
@@ -141,12 +144,30 @@ int redirect_service(struct __sk_buff *skb) {
                 new_dst_ip = ct->backend_ip;
             }
         }
-        /* else if (key.proto == IPPROTO_UDP) {
-            struct udphdr udp;
-            if (bpf_skb_load_bytes(skb, l4_offset, &udp, sizeof(udp)) < 0)
-                return TC_ACT_SHOT;
-            key.src_port = udp.source;
-        }*/
+      else if (key.proto == IPPROTO_UDP) {
+            struct udphdr *udp = l4;
+	    key.src_port = udp->source;
+	    struct ct_val *ct = ct_map.lookup(&key);
+            if (ct == NULL) {
+                u32 backend_ip = (bpf_get_prandom_u32() & 1)
+                            ? bpf_htonl(NEW_DST_IP)
+                            : bpf_htonl(NEW_DST_IP2);
+                struct ct_val new_ct = {
+                    .backend_ip = 0,
+                    .backend_port = 0,
+                    .client_ip = 0,
+                    .client_port = 0,
+                };
+                new_ct.backend_ip = backend_ip;
+                new_ct.backend_port = udp->dest;
+                new_ct.client_ip = dst_ip;
+                new_ct.client_port = udp->source;
+                ct_map.update(&key, &new_ct);
+                new_dst_ip = backend_ip;
+            } else {
+                new_dst_ip = ct->backend_ip;
+            }
+	}
         ip->daddr = new_dst_ip;
         if (bpf_l3_csum_replace(skb, ip_offset + offsetof(struct iphdr, check), dst_ip, new_dst_ip, sizeof(new_dst_ip)) < 0) {
             bpf_trace_printk("Failed to update IP checksum\\n");
