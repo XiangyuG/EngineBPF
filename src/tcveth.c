@@ -35,6 +35,9 @@
 #define DSTIFINDEX2 15          // destination #2 interface ifindex
 #endif
 
+#ifndef SRCVPEER
+#define SRCVPEER 0 // 0 is no vpeer on the way back
+#endif
 
 #define IS_PSEUDO 0x10
 
@@ -208,6 +211,9 @@ int redirect_service(struct __sk_buff *skb) {
         if (ret < 0) {
             bpf_trace_printk("l4 csum replace ret=%d\\n", ret);
             return TC_ACT_SHOT;
+        }
+        if (SRCVPEER == 1 ) {
+            return bpf_redirect_peer(SRCIF, 0);
         }
 	return bpf_redirect(SRCIF, 0);
    }

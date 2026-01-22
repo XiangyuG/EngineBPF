@@ -94,30 +94,22 @@ def cleanup():
     
 ipr = IPRoute()
 
-interfaces = [
- "lxcb54b62d61434",
- "lxc102115b89e79",
- "lxc04e01eda2318",
-]
-
-src_ip     = "10.0.1.210"
-src_ifindex = 13
-
-svcip      = "10.104.111.207"
-
-dst_ip_map = {
-    12: "10.0.1.122",
-    15: "10.0.1.84",
-}
 
 # if a config file is provided, ignore the upper variables and inject the new ones. Else, the variables wont change.
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", "-c", help="Path to JSON config file", default=None)
+parser.add_argument(
+    "--cni",
+    help="Which CNI plugin: cilium or flannel",
+    choices=["cilium", "flannel"],
+    required=True,
+)
 args = parser.parse_args()
 
-interfaces, src_ip, src_ifindex, svcip, dst_ip_map = apply_config(
-    args.config, interfaces, src_ifindex, src_ip, svcip, dst_ip_map
-)
+# cilium => vpeer=1, flannel => vpeer=0
+vpeer = 1 if args.cni == "cilium" else 0
+
+interfaces, src_ifindex, svcs = apply_config(args.config)
 interfaces = list(dict.fromkeys(interfaces))
 
 # derive two destinations from dict
