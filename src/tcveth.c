@@ -54,6 +54,15 @@ struct ct_val {
     u16 client_port;
 };
 
+
+struct backend_pair {
+    u32 dst1;
+    u32  ifindex1;
+    u32 dst2;
+    u32  ifindex2;
+};
+// map service -> backends. size: 32 services, key is the svc ip
+BPF_HASH(svc_backends, u32, struct backend_pair, 32);
 BPF_TABLE("lru_hash", struct ct_key, struct ct_val, ct_map, 65536);
 
 //BPF_HASH(backend_set, u32, u8);
@@ -214,8 +223,8 @@ int redirect_service(struct __sk_buff *skb) {
         }
         if (SRCVPEER == 1 ) {
             return bpf_redirect_peer(SRCIF, 0);
-        }
-	return bpf_redirect(SRCIF, 0);
+        } 
+        return bpf_redirect(SRCIF, 0);
    }
     
    return TC_ACT_OK;

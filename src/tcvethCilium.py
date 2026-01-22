@@ -1,32 +1,40 @@
 from bcc import BPF
+import socket
+import struct
+from typing import Optional
 import argparse
 import ipaddress
 from pyroute2 import IPRoute
 import pyroute2
 import json
 import os
-
-
-# convert ipv4 to hexadecimal, to pass later to bpf program
-def ipv4_to_hex(ip: str) -> str:
-    value = int(ipaddress.IPv4Address(ip))
-    return f"0x{value:08X}"
-
-#apply configuration, if specified in the --config flag (which is passed as first arg)
-import json
+import ctypes as ct
 from typing import Dict, Tuple, List, Any
 
+
+def ipv4_to_be32(ip: str) -> int:
+    # network byte order u32, matches iphdr->daddr / bpf_htonl() usage in your BPF code
+    return struct.unpack("!I", socket.inet_aton(ip))[0]
+# convert ipv4 to hexadecimal, to pass later to bpf program
+
+class BackendPair(ct.Structure):
+    _fields_ = [
+        ("dst1", ct.c_uint32),
+        ("ifindex1", ct.c_uint32),
+        ("dst2", ct.c_uint32),
+        ("ifindex2", ct.c_uint32),
+    ]
+#apply configuration, if specified in the --config flag (which is passed as first arg)
+
 # apply configuration, if specified in the --config flag (which is passed as first arg)
-def apply_config(
-    path: str,
-    interfaces: list,
-    src_ifindex: int,
-    src_ip: str,
-    svcip: str,
-    dst_ip_map: Dict[int, str],
-) -> Tuple[List[Any], str, int, str, Dict[int, str]]:
+def apply_config(path: Optional[str]) -> Tuple[List[str], int, dict]:
+    # defaults (must be defined somewhere)
+    interfaces = ["veth0"]
+    src_ifindex = 2
+    svc_dict: Dict[str, List[List[Any]]] = {}
+
     if not path:
-        return interfaces, src_ip, src_ifindex, svcip, dst_ip_map
+        return interfaces, src_ifindex, svc_dict
 
     with open(path, "r") as f:
         cfg = json.load(f)
@@ -34,35 +42,14 @@ def apply_config(
     if isinstance(cfg.get("interfaces"), list) and cfg["interfaces"]:
         interfaces = cfg["interfaces"]
 
-    if isinstance(cfg.get("src_ip"), str) and cfg["src_ip"]:
-        src_ip = cfg["src_ip"]
-
-    if isinstance(cfg.get("svcip"), str) and cfg["svcip"]:
-        svcip = cfg["svcip"]
-
-    # accept int or numeric string
     if "src_ifindex" in cfg and cfg["src_ifindex"] not in (None, ""):
-        try:
-            src_ifindex = int(cfg["src_ifindex"])
-        except (TypeError, ValueError):
-            pass
+        src_ifindex = int(cfg["src_ifindex"])
 
-    cfg_dst = cfg.get("dst_ip")
-    if isinstance(cfg_dst, dict) and cfg_dst:
-        new_map: Dict[int, str] = {}
-        for k, v in cfg_dst.items():
-            if not isinstance(v, str) or not v:
-                continue
-            try:
-                ifindex_key = int(k)
-            except (TypeError, ValueError):
-                continue
-            new_map[ifindex_key] = v
+    if isinstance(cfg.get("svcip"), dict) and cfg["svcip"]:
+        svc_dict = cfg["svcip"]
+        
 
-        if new_map:
-            dst_ip_map = new_map
-
-    return interfaces, src_ip, src_ifindex, svcip, dst_ip_map
+    return interfaces,  src_ifindex, svc_dict
 
 
 def cleanup():
@@ -112,23 +99,15 @@ vpeer = 1 if args.cni == "cilium" else 0
 interfaces, src_ifindex, svcs = apply_config(args.config)
 interfaces = list(dict.fromkeys(interfaces))
 
-# derive two destinations from dict
-dst_items = sorted(dst_ip_map.items(), key=lambda kv: kv[0])
-if len(dst_items) < 2:
-    raise ValueError("dst_ip must contain at least two entries: {ifindex: ip}")
 
-(dst_ifindex1, new_dst_ip1), (dst_ifindex2, new_dst_ip2) = dst_items[0], dst_items[1]
 indexes = []
 #inject configuration parameters as cflags in bpf program
 cflags = [
-    f"-DSRC_IP={ipv4_to_hex(src_ip)}",
     f"-DSRCIF={int(src_ifindex)}",
-    f"-DSVCIP={ipv4_to_hex(svcip)}",
-    f"-DNEW_DST_IP={ipv4_to_hex(new_dst_ip1)}",
-    f"-DDSTIFINDEX={int(dst_ifindex1)}",
-    f"-DNEW_DST_IP2={ipv4_to_hex(new_dst_ip2)}",
-    f"-DDSTIFINDEX2={int(dst_ifindex2)}",
+    f"-DSRCVPEER={vpeer}",
+
 ]
+
 
 # Ensure the interface exists
 try:
@@ -153,6 +132,21 @@ try:
     here = os.path.dirname(os.path.abspath(__file__))
     c_file = os.path.join(here, "tcveth.c")
     b = BPF(src_file = c_file, cflags=cflags, debug=0)
+    svc_backends = b.get_table("svc_backends", keytype=ct.c_uint32, leaftype=BackendPair)
+    for k,v in svcs.items():
+        new_dst_ip1 = v[0][1]
+        new_dst_ip2 = v[1][1]
+        dst_ifindex1 = v[0][0]
+        dst_ifindex2 = v[1][0]
+        svc_key = ct.c_uint32(ipv4_to_be32(k))
+    
+        leaf = BackendPair(
+            dst1=ipv4_to_be32(new_dst_ip1),
+            ifindex1=int(dst_ifindex1),
+            dst2=ipv4_to_be32(new_dst_ip2),
+            ifindex2=int(dst_ifindex2),
+        )
+        svc_backends[svc_key] = leaf
     # TODO: Add automatically later
    # backend_set = b["backend_set"]
    # backend_set[backend_set.Key(0x0A000132)] = backend_set.Leaf(1)  # 10.0.1.110
