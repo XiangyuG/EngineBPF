@@ -50,6 +50,7 @@ struct ct_key {
 struct ct_val {
     u32 backend_ip;
     u16 backend_port;
+    u32 backend_idx;
     u32 client_ip;
     u16 client_port;
 };
@@ -90,34 +91,34 @@ static inline int l4_checksum_update(struct __sk_buff *skb, int ip_offset, int l
 int redirect_service(struct __sk_buff *skb) {
     int ifindex = skb->ifindex;
     // bpf_trace_printk("redirect_service tc_ingress on ifindex=%d\\n", ifindex);
-   void *data = (void *)(long)skb->data; 
-   void *data_end = (void *)(long)skb->data_end; 
-   struct ethhdr *eth = data; 
-    if ((void *)(eth + 1) > data_end) 
+   void *data = (void *)(long)skb->data;
+   void *data_end = (void *)(long)skb->data_end;
+   struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end)
         return TC_ACT_OK;
-    if (eth->h_proto != bpf_htons(ETH_P_IP)) 
+    if (eth->h_proto != bpf_htons(ETH_P_IP))
         return TC_ACT_OK;
-    struct iphdr *ip = data + sizeof(struct ethhdr); 
-    if ((void *)(ip + 1) > data_end) 
-        return TC_ACT_OK; 
-    if (ip->ihl < 5) { 
-        bpf_trace_printk("Invalid IP header length: %d\\n", ip->ihl); 
-        return TC_ACT_SHOT; 
+    struct iphdr *ip = data + sizeof(struct ethhdr);
+    if ((void *)(ip + 1) > data_end)
+        return TC_ACT_OK;
+    if (ip->ihl < 5) {
+        bpf_trace_printk("Invalid IP header length: %d\\n", ip->ihl);
+        return TC_ACT_SHOT;
     }
-    void *l4 = data + sizeof(struct ethhdr) + ip->ihl * 4; 
-    if (l4 + sizeof(struct tcphdr) > data_end) 
+    void *l4 = data + sizeof(struct ethhdr) + ip->ihl * 4;
+    if (l4 + sizeof(struct tcphdr) > data_end)
         return TC_ACT_OK;
-   
+
    u32 dst_ip = ip->daddr;
-   u32 src_ip = ip->saddr;     
-   
+   u32 src_ip = ip->saddr;
+
     // Check reply first
    struct ct_key key = { .src_ip = 0, .src_port = 0, .proto = 0};
    key.proto = ip->protocol;
    int l4_offset = sizeof(struct ethhdr) + (ip->ihl * 4);
-   
+
    if (ip->protocol == IPPROTO_TCP) {
-    struct tcphdr *tcp = l4; 
+    struct tcphdr *tcp = l4;
     key.src_port = tcp->dest;
    } else if (ip->protocol == IPPROTO_UDP) {
     struct udphdr *udp = l4;
@@ -126,58 +127,71 @@ int redirect_service(struct __sk_buff *skb) {
 
    //u8 *is_backend = backend_set.lookup(&src_ip);
    int ip_offset = 14;
-   
 
-    if (dst_ip == bpf_htonl(SVCIP)) {
+   u32 dst_ip_host = bpf_ntohl(dst_ip);
+   struct backend_pair *bk_pair = svc_backends.lookup(&dst_ip_host);
+   if (bk_pair) {
         // bpf_trace_printk("Service IP matched, processing packet\\n");
-        key.src_ip = src_ip; 
+	u32 ifidx = 0;
+        key.src_ip = src_ip;
         u32 new_dst_ip = 0; // Initialization
         if (key.proto == IPPROTO_TCP) {
-            struct tcphdr *tcp = l4; 
+            struct tcphdr *tcp = l4;
             key.src_port = tcp->source;
             struct ct_val *ct = ct_map.lookup(&key);
-            if (ct == NULL) {
-                u32 backend_ip = (bpf_get_prandom_u32() & 1)
-                            ? bpf_htonl(NEW_DST_IP)
-                            : bpf_htonl(NEW_DST_IP2);
-                struct ct_val new_ct = {
+	    if (ct == NULL) {
+		struct ct_val new_ct = {
                     .backend_ip = 0,
                     .backend_port = 0,
+		    .backend_idx = 0,
                     .client_ip = 0,
                     .client_port = 0,
                 };
-                new_ct.backend_ip = backend_ip;
+		if (bpf_get_prandom_u32() & 1) {
+		    new_ct.backend_ip = bpf_htonl(bk_pair->dst1);
+                    new_ct.backend_idx = bk_pair->ifindex1;
+		} else {
+		    new_ct.backend_ip = bpf_htonl(bk_pair->dst2);
+                    new_ct.backend_idx = bk_pair->ifindex2;
+		}
                 new_ct.backend_port = tcp->dest;
                 new_ct.client_ip = dst_ip;
                 new_ct.client_port = tcp->source;
                 ct_map.update(&key, &new_ct);
-                new_dst_ip = backend_ip;
-            } else {
-                new_dst_ip = ct->backend_ip;
-            }
-        }
-      else if (key.proto == IPPROTO_UDP) {
+                new_dst_ip = new_ct.backend_ip;
+		ifidx = new_ct.backend_idx;
+	    } else {
+		new_dst_ip = ct->backend_ip;
+		ifidx = ct->backend_idx;
+	    }
+        } else if (key.proto == IPPROTO_UDP) {
             struct udphdr *udp = l4;
 	    key.src_port = udp->source;
 	    struct ct_val *ct = ct_map.lookup(&key);
-            if (ct == NULL) {
-                u32 backend_ip = (bpf_get_prandom_u32() & 1)
-                            ? bpf_htonl(NEW_DST_IP)
-                            : bpf_htonl(NEW_DST_IP2);
-                struct ct_val new_ct = {
+	    if (ct == NULL) {
+		struct ct_val new_ct = {
                     .backend_ip = 0,
                     .backend_port = 0,
+		    .backend_idx = 0,
                     .client_ip = 0,
                     .client_port = 0,
                 };
-                new_ct.backend_ip = backend_ip;
+		if (bpf_get_prandom_u32() & 1) {
+		    new_ct.backend_ip = bpf_htonl(bk_pair->dst1);
+                    new_ct.backend_idx = bk_pair->ifindex1;
+		} else {
+		    new_ct.backend_ip = bpf_htonl(bk_pair->dst2);
+                    new_ct.backend_idx = bk_pair->ifindex2;
+		}
                 new_ct.backend_port = udp->dest;
                 new_ct.client_ip = dst_ip;
                 new_ct.client_port = udp->source;
                 ct_map.update(&key, &new_ct);
-                new_dst_ip = backend_ip;
+                new_dst_ip = new_ct.backend_ip;
+		ifidx = new_ct.backend_idx;
             } else {
                 new_dst_ip = ct->backend_ip;
+		ifidx = ct->backend_idx;
             }
 	}
         ip->daddr = new_dst_ip;
@@ -191,31 +205,25 @@ int redirect_service(struct __sk_buff *skb) {
         if (ret < 0) {
             bpf_trace_printk("l4 csum replace ret=%d\\n", ret);
             return TC_ACT_SHOT;
-        }        
-	
-    bpf_skb_change_type(skb,PACKET_HOST);
-	if (new_dst_ip == bpf_htonl(NEW_DST_IP)) {
-	    return bpf_redirect_peer(DSTIFINDEX, 0);
-	} else {
-	    return bpf_redirect_peer(DSTIFINDEX2, 0);
-	}
-	
-    }   
+        }
 
+    bpf_skb_change_type(skb,PACKET_HOST);
+    return bpf_redirect_peer(ifidx, 0);
+
+    }
     key.src_ip = dst_ip;
     struct ct_val *ct = ct_map.lookup(&key);
-   // if (is_backend && ct) {
    if (ct) {
         // bpf_trace_printk("Found CT entry for reply packet\\n");
         u32 new_src_ip = ct->client_ip; // From pod IP to svc IP
-        // Store the updated destination IP in the packet   
+        // Store the updated destination IP in the packet
         ip->saddr = new_src_ip;
         if (bpf_l3_csum_replace(skb, ip_offset + offsetof(struct iphdr, check), src_ip, new_src_ip, sizeof(new_src_ip)) < 0) {
             bpf_trace_printk("Failed to update IP l3 checksum\\n");
             return TC_ACT_SHOT;
         }
         u16 protocol = key.proto;
-        
+
         int ret = l4_checksum_update(skb, ip_offset, l4_offset, protocol, src_ip, new_src_ip);
         if (ret < 0) {
             bpf_trace_printk("l4 csum replace ret=%d\\n", ret);
@@ -223,9 +231,9 @@ int redirect_service(struct __sk_buff *skb) {
         }
         if (SRCVPEER == 1 ) {
             return bpf_redirect_peer(SRCIF, 0);
-        } 
+        }
         return bpf_redirect(SRCIF, 0);
    }
-    
+
    return TC_ACT_OK;
 }
