@@ -55,15 +55,14 @@ struct ct_val {
     u16 client_port;
 };
 
-
 struct backend_pair {
-    u32 dst1;
-    u32  ifindex1;
-    u32 dst2;
-    u32  ifindex2;
+    u32 size;
+    u32 ips[4];
 };
+
 // map service -> backends. size: 32 services, key is the svc ip
 BPF_HASH(svc_backends, u32, struct backend_pair, 32);
+BPF_HASH(podIfIdx, u32, u32, 32);
 BPF_TABLE("lru_hash", struct ct_key, struct ct_val, ct_map, 65536);
 
 //BPF_HASH(backend_set, u32, u8);
@@ -127,7 +126,6 @@ int redirect_service(struct __sk_buff *skb) {
 
    //u8 *is_backend = backend_set.lookup(&src_ip);
    int ip_offset = 14;
-
    u32 dst_ip_host = bpf_ntohl(dst_ip);
    struct backend_pair *bk_pair = svc_backends.lookup(&dst_ip_host);
    if (bk_pair) {
@@ -135,7 +133,7 @@ int redirect_service(struct __sk_buff *skb) {
 	u32 ifidx = 0;
         key.src_ip = src_ip;
         u32 new_dst_ip = 0; // Initialization
-        if (key.proto == IPPROTO_TCP) {
+	if (key.proto == IPPROTO_TCP) {
             struct tcphdr *tcp = l4;
             key.src_port = tcp->source;
             struct ct_val *ct = ct_map.lookup(&key);
@@ -147,16 +145,33 @@ int redirect_service(struct __sk_buff *skb) {
                     .client_ip = 0,
                     .client_port = 0,
                 };
-		if (bpf_get_prandom_u32() & 1) {
-		    new_ct.backend_ip = bpf_htonl(bk_pair->dst1);
-                    new_ct.backend_idx = bk_pair->ifindex1;
-		} else {
-		    new_ct.backend_ip = bpf_htonl(bk_pair->dst2);
-                    new_ct.backend_idx = bk_pair->ifindex2;
+		u32 backend_size = bk_pair->size;
+		if (backend_size == 0 || backend_size > 4)
+                    return TC_ACT_OK;
+		u32 choiceId = bpf_get_prandom_u32() % backend_size;
+		if (choiceId >= 4) {
+		    return TC_ACT_OK;
 		}
+		// Do mod
+		u32 chosenIp = 0;
+		switch (choiceId) {
+		    case 0: chosenIp = bk_pair->ips[0]; break;
+		    case 1: chosenIp = bk_pair->ips[1]; break;
+		    case 2: chosenIp = bk_pair->ips[2]; break;
+		    case 3: chosenIp = bk_pair->ips[3]; break;
+		    default: return TC_ACT_OK;
+		}
+		new_ct.backend_ip = bpf_htonl(chosenIp);
+		// Get ifidx
                 new_ct.backend_port = tcp->dest;
                 new_ct.client_ip = dst_ip;
                 new_ct.client_port = tcp->source;
+		u32 *idxptr = podIfIdx.lookup(&chosenIp);
+	        if (idxptr) {
+		    new_ct.backend_idx = (*idxptr);
+		} else {
+		    return TC_ACT_OK;
+		}
                 ct_map.update(&key, &new_ct);
                 new_dst_ip = new_ct.backend_ip;
 		ifidx = new_ct.backend_idx;
@@ -176,16 +191,31 @@ int redirect_service(struct __sk_buff *skb) {
                     .client_ip = 0,
                     .client_port = 0,
                 };
-		if (bpf_get_prandom_u32() & 1) {
-		    new_ct.backend_ip = bpf_htonl(bk_pair->dst1);
-                    new_ct.backend_idx = bk_pair->ifindex1;
-		} else {
-		    new_ct.backend_ip = bpf_htonl(bk_pair->dst2);
-                    new_ct.backend_idx = bk_pair->ifindex2;
+		u32 backend_size = bk_pair->size;
+		if (backend_size == 0 || backend_size > 4)
+                    return TC_ACT_OK;
+		u32 choiceId = bpf_get_prandom_u32() % backend_size;
+		if (choiceId >= 4) {
+		    return TC_ACT_OK;
 		}
+                u32 chosenIp = 0;
+		switch (choiceId) {
+		    case 0: chosenIp = bk_pair->ips[0]; break;
+		    case 1: chosenIp = bk_pair->ips[1]; break;
+		    case 2: chosenIp = bk_pair->ips[2]; break;
+		    case 3: chosenIp = bk_pair->ips[3]; break;
+		    default: return TC_ACT_OK;
+		}
+		new_ct.backend_ip = bpf_htonl(chosenIp);
                 new_ct.backend_port = udp->dest;
                 new_ct.client_ip = dst_ip;
                 new_ct.client_port = udp->source;
+		u32 *idxptr = podIfIdx.lookup(&chosenIp);
+	        if (idxptr) {
+		    new_ct.backend_idx = (*idxptr);
+		} else {
+		    return TC_ACT_OK;
+		}
                 ct_map.update(&key, &new_ct);
                 new_dst_ip = new_ct.backend_ip;
 		ifidx = new_ct.backend_idx;
@@ -212,6 +242,7 @@ int redirect_service(struct __sk_buff *skb) {
 
     }
     key.src_ip = dst_ip;
+
     struct ct_val *ct = ct_map.lookup(&key);
    if (ct) {
         // bpf_trace_printk("Found CT entry for reply packet\\n");
@@ -229,11 +260,19 @@ int redirect_service(struct __sk_buff *skb) {
             bpf_trace_printk("l4 csum replace ret=%d\\n", ret);
             return TC_ACT_SHOT;
         }
-        if (SRCVPEER == 1 ) {
-            return bpf_redirect_peer(SRCIF, 0);
+	u32 ifidx = 0;
+	u32 *ifidxptr = podIfIdx.lookup(&dst_ip_host);
+	if (ifidxptr) {
+	    ifidx = (*ifidxptr);
+	} else {
+	    return TC_ACT_OK;
+	}
+        if (SRCVPEER == 1) {
+            return bpf_redirect_peer(ifidx, 0);
         }
-        return bpf_redirect(SRCIF, 0);
+        return bpf_redirect(ifidx, 0);
    }
 
    return TC_ACT_OK;
 }
+

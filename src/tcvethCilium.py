@@ -15,26 +15,22 @@ from typing import Dict, Tuple, List, Any
 def ipv4_to_be32(ip: str) -> int:
     # network byte order u32, matches iphdr->daddr / bpf_htonl() usage in your BPF code
     return struct.unpack("!I", socket.inet_aton(ip))[0]
-# convert ipv4 to hexadecimal, to pass later to bpf program
 
 class BackendPair(ct.Structure):
     _fields_ = [
-        ("dst1", ct.c_uint32),
-        ("ifindex1", ct.c_uint32),
-        ("dst2", ct.c_uint32),
-        ("ifindex2", ct.c_uint32),
+        ("size", ct.c_uint32),
+        ("ips", ct.c_uint32 * 4),
     ]
-#apply configuration, if specified in the --config flag (which is passed as first arg)
 
 # apply configuration, if specified in the --config flag (which is passed as first arg)
 def apply_config(path: Optional[str]) -> Tuple[List[str], int, dict]:
     # defaults (must be defined somewhere)
     interfaces = ["veth0"]
-    src_ifindex = 2
     svc_dict: Dict[str, List[List[Any]]] = {}
+    ip_ifidx_dict: Dict[int, int] = {}
 
     if not path:
-        return interfaces, src_ifindex, svc_dict
+        return interfaces, svc_dict, ip_ifidx_dict
 
     with open(path, "r") as f:
         cfg = json.load(f)
@@ -42,14 +38,13 @@ def apply_config(path: Optional[str]) -> Tuple[List[str], int, dict]:
     if isinstance(cfg.get("interfaces"), list) and cfg["interfaces"]:
         interfaces = cfg["interfaces"]
 
-    if "src_ifindex" in cfg and cfg["src_ifindex"] not in (None, ""):
-        src_ifindex = int(cfg["src_ifindex"])
-
     if isinstance(cfg.get("svcip"), dict) and cfg["svcip"]:
         svc_dict = cfg["svcip"]
-        
 
-    return interfaces,  src_ifindex, svc_dict
+    if isinstance(cfg.get("podIfIdx"), dict) and cfg["podIfIdx"]:
+        ip_ifidx_dict = cfg["podIfIdx"]
+
+    return interfaces, svc_dict, ip_ifidx_dict
 
 
 def cleanup():
@@ -78,7 +73,7 @@ def cleanup():
 
 
     print("[✓] Cleanup done.")
-    
+
 ipr = IPRoute()
 
 
@@ -96,14 +91,13 @@ args = parser.parse_args()
 # cilium => vpeer=1, flannel => vpeer=0
 vpeer = 1 if args.cni == "cilium" else 0
 
-interfaces, src_ifindex, svcs = apply_config(args.config)
+interfaces, svcs, ip_ifidx_dict = apply_config(args.config)
 interfaces = list(dict.fromkeys(interfaces))
 
 
 indexes = []
 #inject configuration parameters as cflags in bpf program
 cflags = [
-    f"-DSRCIF={int(src_ifindex)}",
     f"-DSRCVPEER={vpeer}",
 
 ]
@@ -121,7 +115,7 @@ except IndexError:
 try:
     for idx in indexes:
         ipr.tc("add", "clsact", idx)
-  
+
 except Exception as e:
     print(f"clsact qdisc already exists: {e}")
 
@@ -133,24 +127,19 @@ try:
     c_file = os.path.join(here, "tcveth.c")
     b = BPF(src_file = c_file, cflags=cflags, debug=0)
     svc_backends = b.get_table("svc_backends", keytype=ct.c_uint32, leaftype=BackendPair)
+    print(svcs)
     for k,v in svcs.items():
-        new_dst_ip1 = v[0][1]
-        new_dst_ip2 = v[1][1]
-        dst_ifindex1 = v[0][0]
-        dst_ifindex2 = v[1][0]
         svc_key = ct.c_uint32(ipv4_to_be32(k))
-    
-        leaf = BackendPair(
-            dst1=ipv4_to_be32(new_dst_ip1),
-            ifindex1=int(dst_ifindex1),
-            dst2=ipv4_to_be32(new_dst_ip2),
-            ifindex2=int(dst_ifindex2),
-        )
+        leaf = BackendPair()
+        leaf.size = len(v)
+        for i in range(len(v)):
+            leaf.ips[i] = ipv4_to_be32(v[i])
         svc_backends[svc_key] = leaf
-    # TODO: Add automatically later
-   # backend_set = b["backend_set"]
-   # backend_set[backend_set.Key(0x0A000132)] = backend_set.Leaf(1)  # 10.0.1.110
-   # backend_set[backend_set.Key(0x0A00012A)] = backend_set.Leaf(1)  # 10.0.1.42
+    podIfIdx = b.get_table("podIfIdx", keytype=ct.c_uint32, leaftype=ct.c_uint32)
+    for k,v in ip_ifidx_dict.items():
+        podIfIdx_key = ct.c_uint32(ipv4_to_be32(k))
+        podIfIdx_val = ct.c_uint32(v)
+        podIfIdx[podIfIdx_key] = podIfIdx_val
 
     fn = b.load_func("redirect_service", BPF.SCHED_CLS)
     for idx in indexes:
@@ -162,3 +151,4 @@ try:
     b.trace_print()
 finally:
    cleanup()
+
